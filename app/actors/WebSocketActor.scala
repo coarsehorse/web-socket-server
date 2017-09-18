@@ -1,85 +1,69 @@
 package actors
 
-import javax.inject.Inject
-
 import adapters._
 import adapters.messages._
 import akka.actor.{Actor, ActorRef, Props}
-import akka.stream.Materializer
 import controllers.WebSocketController
-import models.{ModelDAO, UsersCollection}
+import models.ModelDAO
 import play.api.libs.json._
-import play.modules.reactivemongo.ReactiveMongoApi
+import play.modules.reactivemongo.json._
 import reactivemongo.api.commands.{UpdateWriteResult, WriteResult}
 
-import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
-import scala.util.{Failure, Success}
-import play.modules.reactivemongo.json._
+import scala.concurrent.{Await, ExecutionContext, Future}
 
 object WebSocketActor {
-  private var userIsAuthenticated: Boolean = true
-  println("userIsAuthenticated set to always be TRUE")
-  private var userIsSubscribed: Boolean = false
-  private var userIsAdmin: Boolean = true
-  println("userIsAdmin set to always be TRUE")
 
   private var usersColl: ModelDAO = _
   private var tablesColl: ModelDAO = _
 
-  def props(out: ActorRef, usersCollection: ModelDAO, tablesCollection: ModelDAO)
+  def props(client: ActorRef, usersCollection: ModelDAO, tablesCollection: ModelDAO)
            (implicit ex: ExecutionContext): Props = {
     usersColl = usersCollection
     tablesColl = tablesCollection
 
-    Props(new WebSocketActor(out))
+    Props(new WebSocketActor(client))
   }
 }
 
-class WebSocketActor(out: ActorRef)
+class WebSocketActor(client: ActorRef)
                     (implicit ex: ExecutionContext) extends Actor {
+
   import WebSocketActor._
 
-  override def preStart(): Unit = {
-    println("Started: " + this)
-  }
-  override def postStop() {
-    println("Stopped: " + this)
-  }
+  private var clientIsAuthenticated: Boolean = false
+  private var clientIsSubscribed: Boolean = false
+  private var clientIsAdmin: Boolean = false
 
-  def handleMessage(msg: ClientMessage): JsValue = {
-    // debug
-    println("in handleMessage(), my shit: " + msg)
-    //
-    msg match {
-        // Available to everyone
+  def handleMessage(msg: ClientMessage): JsValue = msg match {
+    // Available to everyone
     case msg: MessageLogin => handleMessageLogin(msg)
 
-      // Available to authorised users
-    case msg: ClientMessage if !userIsAuthenticated
+    // Available to authorised clients
+    case msg: ClientMessage if !clientIsAuthenticated
                                   => MessageError("not_authorized")
     case msg: MessagePing         => handleMessagePing(msg)
     case msg: MessageSubscribe    => handleMessageSubscribe(msg)
     case msg: MessageUnSubscribe  => handleMessageUnSubscribe(msg)
     case msg: MessageError        => msg
 
-      // From subscription actor, notifications
+    // From subscription actor, notifications
     case msg: MessageTableAdded   => msg
     case msg: MessageTableUpdated => msg
     case msg: MessageTableRemoved => msg
 
-      // Available only to admins
-    case msg: ClientMessage if !userIsAdmin
+    // Available only to admins
+    case msg: ClientMessage if !clientIsAdmin
                                   => MessageError("not_authorized")
     case msg: MessageAddTable     => handleMessageAddTable(msg)
     case msg: MessageUpdateTable  => handleMessageUpdateTable(msg)
     case msg: MessageRemoveTable  => handleMessageRemoveTable(msg)
-  }}
+  }
 
   def receive: PartialFunction[Any, Unit] = {
     case clientMessage: JsValue =>
-      val response = handleMessage(clientMessage)
-      out ! response
+      val response: JsValue = handleMessage(clientMessage)
+      client ! response
   }
 
   def handleMessagePing(msg: MessagePing): JsValue = {
@@ -87,24 +71,25 @@ class WebSocketActor(out: ActorRef)
   }
 
   def handleMessageLogin(msg: MessageLogin): JsValue = {
-    val findFuture = usersColl.findOne[User](Json.obj("username" -> msg.username))
+    val findFuture: Future[Option[User]] =
+      usersColl.findOne[User](selector = Json.obj("username" -> msg.username))
 
     Await.result(findFuture, 3 seconds) match {
       case Some(u) =>                     // username from req is present in db
         if (u.password == msg.password) { // password is true
-          userIsAuthenticated = true
+          clientIsAuthenticated = true
           if (u.user_type == "admin")     // check user role
-            userIsAdmin = true
+            clientIsAdmin = true
           else
-            userIsAdmin = false
+            clientIsAdmin = false
           MessageLoginSuccessful(MessageLoginSuccessful.MSG_TYPE, u.user_type)
         }
         else {                            // password is false
-          userIsAuthenticated = false
+          clientIsAuthenticated = false
           MessageLoginFailed(MessageLoginFailed.MSG_TYPE)
         }
-      case None =>                      // username from req is NOT present in db
-        userIsAuthenticated = false
+      case None =>                        // username from req is NOT present in db
+        clientIsAuthenticated = false
         MessageLoginFailed(MessageLoginFailed.MSG_TYPE)
     }
   }
@@ -112,16 +97,16 @@ class WebSocketActor(out: ActorRef)
   def handleMessageSubscribe(msg: MessageSubscribe): JsValue = {
     import SubscriptionActor._
 
-    val subsActor = WebSocketController.getSubscriptionActor
-    subsActor ! Subscribe(out)
-    userIsSubscribed = true
+    WebSocketController.getSubscriptionActor ! Subscribe(client)
+    clientIsSubscribed = true
 
-    val findFuture = tablesColl.find[Table]()
+    val findFuture: Future[List[Table]] = // find tables for response
+      tablesColl.find[Table]()
 
     Await.result(findFuture, 3 seconds) match {
-      case tables: List[Table] =>
+      case tables: List[Table] =>         // tables are present in db
         MessageTableList(MessageTableList.MSG_TYPE, tables)
-      case _ =>
+      case _ =>                           // no tables in db
         MessageTableList(MessageTableList.MSG_TYPE, List())
     }
   }
@@ -129,25 +114,24 @@ class WebSocketActor(out: ActorRef)
   def handleMessageUnSubscribe(msg: MessageUnSubscribe): JsValue = {
     import SubscriptionActor._
 
-    val subsActor = WebSocketController.getSubscriptionActor
-    subsActor ! UnSubscribe(out)
-    userIsSubscribed = false
+    WebSocketController.getSubscriptionActor ! UnSubscribe(client)
+    clientIsSubscribed = false
 
     MessageUnSubscribeDone(MessageUnSubscribeDone.MSG_TYPE)
   }
 
   def handleMessageAddTable(msg: MessageAddTable): JsValue = {
-    val updateFuture = tablesColl.update(
-      selector = Json.obj("id" -> Json.obj("$gt" -> msg.after_id)),
-      updater = Json.obj("$inc" -> Json.obj("id" -> 1)),
-      multi = true
-    )
+    val updateFuture: Future[UpdateWriteResult] =       // shift the tables that follow the new
+      tablesColl.update(
+        selector = Json.obj("id" -> Json.obj("$gt" -> msg.after_id)),
+        updater = Json.obj("$inc" -> Json.obj("id" -> 1)),
+        multi = true)
 
     Await.result(updateFuture, 3 seconds) match {
       case updateRes: WriteResult =>
         if (updateRes.ok) {
-          val insertFuture = tablesColl.insert[Table](
-            Table(msg.after_id + 1, msg.table.name, msg.table.participants))
+          val insertFuture = tablesColl.insert[Table](  // insert the new table to the vacant place
+            that = Table(msg.after_id + 1, msg.table.name, msg.table.participants))
 
           Await.result(insertFuture, 3 second) match {
             case insertRes: WriteResult =>
@@ -172,9 +156,9 @@ class WebSocketActor(out: ActorRef)
   def handleMessageUpdateTable(msg: MessageUpdateTable): JsValue = {
     import adapters.ClientMessage._
 
-    val updateFuture = tablesColl.update[JsObject, JsObject](
-      Json.obj("id" -> msg.table.id),
-      Json.obj("$set" -> msg.table))
+    val updateFuture: Future[UpdateWriteResult] = // update table by id
+      tablesColl.update[JsObject, JsObject](Json.obj("id" -> msg.table.id),
+        Json.obj("$set" -> msg.table))
 
     Await.result(updateFuture, 3 seconds) match {
       case updateRes: WriteResult =>
@@ -193,7 +177,7 @@ class WebSocketActor(out: ActorRef)
   }
 
   def handleMessageRemoveTable(msg: MessageRemoveTable) = {
-    val removeFuture = tablesColl.remove[JsObject](Json.obj("id" -> msg.id))
+    val removeFuture = tablesColl.remove[JsObject](Json.obj("id" -> msg.id)) // remove table by id
 
     Await.result(removeFuture, 3 seconds) match {
       case updateRes: WriteResult =>

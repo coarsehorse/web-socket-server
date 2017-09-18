@@ -1,39 +1,44 @@
 package controllers
 
-import play.api.mvc._
-import play.api.libs.streams.ActorFlow
 import javax.inject.Inject
 
 import actors.{SubscriptionActor, WebSocketActor}
-import adapters.messages.{MessageLogin, User}
 import akka.actor.{ActorRef, ActorSystem}
-import akka.stream.scaladsl.{Flow, Sink, Source}
-import akka.stream.{ActorMaterializer, Materializer}
+import akka.stream.Materializer
 import models.{TablesCollection, UsersCollection}
+import play.api.libs.json.JsValue
+import play.api.libs.streams.ActorFlow
+import play.api.mvc._
 import play.api.Configuration
-import play.api.libs.json.{JsObject, JsValue, Json}
+import play.api.Logger
 
-import scala.concurrent.{Await, ExecutionContext, Future}
-import scala.util.{Failure, Success}
-import scala.concurrent.duration._
+import scala.concurrent.ExecutionContext
 
 object WebSocketController {
+
   private var subscriptionActor: ActorRef = _
 
   def getSubscriptionActor: ActorRef = subscriptionActor
 }
 
-class WebSocketController @Inject()(cc: ControllerComponents,
+class WebSocketController @Inject()(cc: ControllerComponents, config: Configuration,
                                     usersCollection: UsersCollection, tablesCollection: TablesCollection)
                                    (implicit system: ActorSystem, mat: Materializer, exc: ExecutionContext)
   extends AbstractController(cc) {
+
     import WebSocketController._
 
     subscriptionActor = system.actorOf(SubscriptionActor.props, "subscriptionActor")
 
+    Logger.info("Application URI: " + config.underlying.getString("app_route"))
+    Logger.info("Database URI: " + config.underlying.getString("mongodb.uri"))
+
+    /**
+      * Flow of connections that is handled by actors
+      */
     def socket: WebSocket = WebSocket.accept[JsValue, JsValue] { request =>
-      ActorFlow.actorRef { out => // Flow that is handled by an actors
-        WebSocketActor.props(out, usersCollection, tablesCollection)  // Get actor handler props
-      }                                                               // and endow it db access
+      ActorFlow.actorRef { client => // Flow that is handled by an actors
+        WebSocketActor.props(client, usersCollection, tablesCollection) // Get actor handler props
+      }                                                                 // and give access to the db
     }
 }

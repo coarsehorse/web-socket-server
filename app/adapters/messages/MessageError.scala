@@ -1,10 +1,10 @@
 package adapters.messages
 
 import adapters.{ClientMessage, MessageObjectType}
-import play.api.libs.json.Json
+import play.api.libs.json.{Json, OFormat}
 
 object MessageError extends MessageObjectType("message_error") {
-  implicit val format = Json.format[MessageError]
+  implicit val format: OFormat[MessageError] = Json.format[MessageError]
 }
 
 /**

@@ -58,7 +58,6 @@ object ClientMessage {
       case msgError:      MessageError              => Json.toJson(msgError)
     }
   }
-
 }
 
 class ClientMessage

@@ -1,7 +1,7 @@
 package actors
 
 import adapters.ClientMessage
-import akka.actor.{Actor, ActorRef, ActorSystem, Props, Terminated}
+import akka.actor.{Actor, ActorRef, Props, Terminated}
 
 object SubscriptionActor {
   def props: Props = Props(new SubscriptionActor())
@@ -11,38 +11,40 @@ object SubscriptionActor {
   final case class Broadcast(message: ClientMessage)
 }
 
+/**
+  * This actor is used for notifying subscribed clients
+  */
 class SubscriptionActor extends Actor {
+
   import SubscriptionActor._
 
-  private var subscribers = Seq.empty[ActorRef]
+  private var subscribers: Seq[ActorRef] = Seq.empty
 
-  override def receive = {
+  override def receive: PartialFunction[Any, Unit] = {
+    // Subscribe for notifications
     case Subscribe(userActor) =>
-      println("subscribers before ++: " + subscribers)
       subscribers.find(_ == userActor) match {
-        case None =>
+        case None =>      // no duplicates
           subscribers = subscribers ++ Seq(userActor)
           context.watch(userActor)
-        case Some(_) => ;
+        case Some(_) => ; // this actor is already subscribed
       }
-      println("subscribers after ++: " + subscribers)
 
+    // Unsubscribe from notifications
     case UnSubscribe(userActor) =>
-      println("subscribers before --: " + subscribers)
       subscribers.find(_ == userActor) match {
-        case Some(_) =>
+        case Some(_) => // actor is present
           subscribers = subscribers diff Seq(userActor)
-        case None => ;
+        case None => ;  // there is no one to unsubscribe
       }
-      println("subscribers after --: " + subscribers)
 
+    // Notify subscribers
     case Broadcast(message) =>
       import adapters.ClientMessage._
 
-      println("Before broadcast")
       subscribers foreach (_ ! clientMessage2jsValue(message))
-      println("Broadcasted")
 
+    // Subscriber is dead
     case Terminated(deceased) =>
       self ! UnSubscribe(deceased)
   }

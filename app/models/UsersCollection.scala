@@ -2,10 +2,8 @@ package models
 
 import akka.stream.Materializer
 import javax.inject.Inject
-
 import play.modules.reactivemongo.ReactiveMongoApi
 import play.api.mvc.{AbstractController, ControllerComponents}
-
 import scala.concurrent.ExecutionContext
 
 class UsersCollection @Inject()(val cc: ControllerComponents,
